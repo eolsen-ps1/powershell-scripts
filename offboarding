@@ -1,0 +1,194 @@
+# Used for offboarding users, does the following: 
+# disables account
+# removing group membership, logging removed groups in a .txt file on a fileshare (line 34)
+# prompts if email forwarding is required, asks who to forward to, converts user to shared mailbox then sets up forwarding
+# moves user to termed OU (lines 108 & 122)
+# removing Office licenses via Graph API,
+# clears termed user out of any direct reports 
+
+___________________________________________________
+
+# Prerequisites - copy and paste to install if running for the first time
+
+# Installs Exchange Online module for accessing Exchange profile
+Install-Module -Name ExchangeOnlineManagement -scope currentuser 
+
+# Installs Microsoft Graph module for removing licenses
+Install-Module Microsoft.Graph -Scope CurrentUser
+
+# Script is below this line
+
+___________________________________________________
+
+#Connect to Exchange Online
+Connect-ExchangeOnline -UserPrincipalName email@email.com
+
+# Prompt the user for an email address
+$email = Read-Host "Please enter the terminated user's email address"
+
+# Split the email address at the '@' symbol
+$emailParts = $email -split '@'
+
+# Store the part before '@' in a variable
+$UPN = $emailParts[0]
+$user = $UPN
+
+# Corrected file path with escaped backslashes and .txt extension
+$filePath = "\\server\filename.txt"
+
+# Get the current user's groups
+$userGroups = (Get-ADUser -Identity $UPN -Property MemberOf).MemberOf
+
+# Initialize an empty array to store group names
+$groupNames = @()
+
+# Loop through each group and extract the CN (Common Name)
+foreach ($group in $userGroups) {
+    $groupName = ($group -split ",")[0] -replace '^CN='
+    $groupNames += $groupName + ";"
+}
+
+# Output each group on a new line in the TXT file
+$groupNames | Out-File -FilePath $filePath -Force -Encoding ASCII
+
+# Establish if forwarding is required
+$input = Read-Host "Is forwarding of the termed user's email required? (Y/N)"
+
+Function ConvertTo-Boolean {
+    Param($Variable)
+    if ($Variable -eq "Y") {
+        return $True
+    } elseif ($Variable -eq "N") {
+        return $False
+    } else {
+        Write-Output "Invalid input. Please enter 'Y' or 'N'."
+        return $null
+    }
+}
+
+$booleanValue = ConvertTo-Boolean -Variable $input
+
+# Initialize $forwardingRule
+$forwardingRule = $null
+
+if ($booleanValue -eq $True) {
+    # Set $forwardingRule to true
+    $forwardingRule = $True
+
+    # Prompt for email address
+    $forwardEmailTo = Read-Host "Please enter the email address to forward the termed user's email to"
+    Write-Output "The email address to forward to is: $forwardEmailTo"
+} elseif ($booleanValue -eq $False) {
+    # Set $forwardingRule to false
+    $forwardingRule = $False
+
+    Write-Output "Forwarding is not required."
+} else {
+    Write-Output "Please provide a valid response."
+}
+
+# Further script logic can use $forwardingRule
+if ($forwardingRule -eq $True) {
+    Write-Output "Forwarding rule is active."
+} elseif ($forwardingRule -eq $False) {
+    Write-Output "Forwarding rule is inactive."
+}
+
+Add-ADGroupMember -Identity NO_Rights -Members $UPN
+$group = Get-ADGroup "No_Rights" -Properties @("primaryGroupToken")
+Get-ADUser $UPN | Set-ADUser -Replace @{primaryGroupID=$group.primaryGroupToken}
+
+Get-ADUser -Identity $UPN -Properties MemberOf | ForEach-Object {
+  $_.MemberOf | Remove-ADGroupMember -Members $_.DistinguishedName -Confirm:$false
+}
+
+Disable-ADAccount $UPN
+
+if ($forwardingRule.Equals($true)) {
+    Get-ADUser -Identity $UPN | Move-ADObject -TargetPath "OU DN"
+        
+    # Ensure the correct primary email address is retained 
+Set-Mailbox $UPN -PrimarySmtpAddress $forwardEmailto 
+
+# Set the forwarding address for the shared mailbox 
+Set-Mailbox $UPN -ForwardingSmtpAddress $forwardEmailTo -DeliverToMailboxAndForward $true
+   
+ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+    Connect-ExchangeOnline
+
+    Set-Mailbox $UPN -Type Shared -ForwardingAddress $forwardEmailTo
+}
+else {
+   Get-ADUser -Identity $UPN | Move-ADObject -TargetPath  "OU DN"
+}
+
+#Removing licenses
+
+# Connect to Microsoft Graph with the necessary scopes
+Connect-Graph -Scopes User.ReadWrite.All, Organization.Read.All
+
+# Check if the user exists before proceeding
+try {
+    $finduser = Get-MgUser -UserId $email
+} catch {
+    Write-Host "User not found. Please check the email address." -ForegroundColor Red
+}
+
+# Retrieve and store the license SKU IDs for the user
+$lsku = Get-MgUserLicenseDetail -UserId $email | Select-Object -ExpandProperty SkuId
+
+# Retrieve and store the license SKU part numbers (names) for the user
+$lskupartnumber = Get-MgUserLicenseDetail -UserId $email | Select-Object -ExpandProperty SkuPartNumber
+
+# Get all licenses assigned to the user
+$userLicenses = Get-MgUserLicenseDetail -UserId $email
+
+# Prepare the list of SKUs to be removed
+$lsku = $userLicenses | Select-Object -ExpandProperty SkuId
+
+try {
+    # Remove all licenses from the user
+    Set-MgUserLicense -UserId $email -RemoveLicenses $lsku -AddLicenses @()
+    Write-Host "All licenses have been removed from the user." -ForegroundColor Green
+} catch {
+    Write-Host "Error occurred while removing licenses $_" -ForegroundColor Red
+}
+
+# Optional: Confirm user license removal
+$remainingLicenses = Get-MgUserLicenseDetail -UserId $email | Select-Object -ExpandProperty SkuId
+if ($remainingLicenses.Count -eq 0) {
+    Write-Host "License removal confirmed. The user no longer has any licenses." -ForegroundColor Green
+} else {
+    Write-Host "The user still has some licenses. Please check manually." -ForegroundColor Yellow
+}
+
+
+#Remove user from direct reports in AD
+
+# Find the user in Active Directory by SamAccountName
+$User = Get-ADUser -Filter {SamAccountName -eq $UPN} -Properties Manager
+
+# Check if user exists
+if ($User) {
+    Write-Host "Found user: $($User.SamAccountName)"
+
+    # Check if the user has a manager
+    if ($User.Manager) {
+        $Manager = Get-ADUser -Identity $User.Manager -Properties DirectReports
+
+        if ($Manager) {
+            Write-Host "Removing $($User.SamAccountName) from $($Manager.SamAccountName)'s direct reports."
+
+            # Remove the user from the manager’s direct reports by clearing the Manager attribute
+            Set-ADUser -Identity $User.DistinguishedName -Clear Manager
+
+            Write-Host "User removed successfully."
+        } else {
+            Write-Host "Manager not found or has no direct reports."
+        }
+    } else {
+        Write-Host "User has no manager assigned."
+    }
+} else {
+    Write-Host "User with UPN $UPN not found in Active Directory."
+}
