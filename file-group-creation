@@ -1,0 +1,67 @@
+#Developed to start building out role-based access control in our file share environment. This script:
+# -takes a given fileshare folder
+# -finds the users with access to it 
+# -creates an AD group with the given name 
+# -places it in the target OU
+#These groups allow for more modular access control to fileshares, especially when the current structure relies on explicit rights assignment
+
+## 
+
+# Ask for the network folder path to examine
+$folderPath = Read-Host "Enter the file path for the folder you want to examine"
+
+# Get the Access Control List (ACL) for the folder
+$acl = Get-Acl -Path $folderPath
+
+# Initialize a list to store users
+$userList = @()
+
+# Loop through each access entry in the ACL to retrieve usernames and emails
+foreach ($access in $acl.Access) {
+    $identity = $access.IdentityReference.ToString()
+
+    # Split the domain and user if present in DOMAIN\username format
+    if ($identity -match "^(.+?)\\(.+)$") {
+        $username = $matches[2]  # Extract just the username part
+    }
+    else {
+        $username = $identity
+    }
+
+    # Attempt to get user details from Active Directory
+    try {
+        $adUser = Get-ADUser -Filter "SamAccountName -eq '$username'" -Properties mail
+
+        if ($adUser) {
+            # Store user details in list
+            $userList += [PSCustomObject]@{
+                Username = $adUser.SamAccountName
+                Email    = $adUser.mail
+            }
+        } else {
+            Write-Warning "User $username not found in Active Directory."
+        }
+    } catch {
+        Write-Warning "Error retrieving details for $username."
+    }
+}
+
+# Import the Active Directory module
+Import-Module ActiveDirectory
+
+# Get the group name and the OU path
+$groupName = Read-Host "Enter the name of the new group, use dashes for slashes and underscore for spaces"
+$ouPath = Read-Host "Enter the distinguished name (DN) of the target OU (e.g., OU=Groups,DC=domain,DC=com)"
+
+# Create the new group in the specified OU
+New-ADGroup -Name $groupName -GroupScope Global -GroupCategory Security -Path $ouPath
+
+# Add users to the newly created group
+foreach ($user in $userList) {
+    try {
+        Add-ADGroupMember -Identity $groupName -Members $user.Username
+        Write-Host "Added $($user.Username) to the group $groupName"
+    } catch {
+        Write-Warning "Error adding $($user.Username) to the group $groupName."
+    }
+}
