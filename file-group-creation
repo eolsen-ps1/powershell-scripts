@@ -1,4 +1,4 @@
-#Developed to start building out role-based access control in our file share environment. This script:
+# Developed to start building out role-based access control in our file share environment. This script:
 # -takes a given fileshare folder
 # -finds the users with access to it 
 # -creates an AD group with the given name 
