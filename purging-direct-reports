@@ -1,0 +1,51 @@
+#This is a housekeeping script for scanning an OU, finding any disabled user accounts and removing them from any direct reports they may still be under
+
+
+# Import Active Directory Module
+Import-Module ActiveDirectory
+
+# Define the target Organizational Unit (OU)
+$OU = Read-Host "Enter the Distinguished Name of the target OU"
+
+# Define log file path with current date
+$LogFile = "\\appdeploy\appdeploy$\Direct Report Cleanup\$(Get-Date -Format 'yyyy-MM-dd').txt"
+
+# Function to write to log file
+function Write-Log {
+    param ([string]$Message)
+    $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$TimeStamp - $Message" | Out-File -Append -FilePath $LogFile
+}
+
+# Start Logging
+Write-Log "Starting Direct Report Cleanup Script"
+Write-Log "Scanning users in OU: $OU"
+
+# Get all users in the specified OU
+$Managers = Get-ADUser -Filter * -SearchBase $OU -Properties DirectReports
+
+# Iterate through each user in the OU
+foreach ($Manager in $Managers) {
+    # Get direct reports of the manager
+    $DirectReports = $Manager.DirectReports
+
+    if ($DirectReports) {
+        foreach ($Report in $DirectReports) {
+            # Get direct report details
+            $User = Get-ADUser -Identity $Report -Properties Enabled, Manager
+
+            if ($User.Enabled -eq $false) {
+                $LogMessage = "Removing disabled user: $($User.SamAccountName) from $($Manager.SamAccountName)'s direct reports."
+                Write-Host $LogMessage
+                Write-Log $LogMessage
+
+                # Remove the manager from the user's 'Manager' attribute
+                Set-ADUser -Identity $User.DistinguishedName -Clear Manager
+            }
+        }
+    }
+}
+
+# End Logging
+Write-Log "Script completed."
+Write-Host "Script completed. Log saved to $LogFile"
